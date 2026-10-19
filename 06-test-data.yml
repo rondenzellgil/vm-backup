@@ -1,0 +1,33 @@
+---
+# Create:  ansible-playbook 06-test-data.yml -e test_mode=create
+# Verify:  ansible-playbook 06-test-data.yml -e test_mode=verify
+- name: Test data with checksum verification
+  hosts: target
+  become: true
+  vars:
+    test_mode: create
+    test_mb: 2000
+
+  tasks:
+    - name: Create test files and checksum manifest
+      ansible.builtin.shell: |
+        mkdir -p {{ data_src }}/testset
+        for i in $(seq 1 20); do
+          head -c {{ (test_mb / 20) | int }}M /dev/urandom > "{{ data_src }}/testset/file $i.bin"
+        done
+        find {{ data_src }}/testset -type f -exec sha256sum {} + > /root/data.sha256
+      args:
+        executable: /bin/bash
+        creates: /root/data.sha256
+      when: test_mode == 'create'
+
+    - name: Verify data against manifest
+      ansible.builtin.command: sha256sum -c --quiet /root/data.sha256
+      register: verify
+      changed_when: false
+      when: test_mode == 'verify'
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "All checksums match"
+      when: test_mode == 'verify' and verify.rc == 0

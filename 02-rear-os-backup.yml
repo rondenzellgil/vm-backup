@@ -1,0 +1,116 @@
+---
+# First run:  ansible-playbook 02-rear-os-backup.yml -e confirm_format=true
+- name: ReaR backup of OS and disk layout to the ReaR drive
+  hosts: target
+  become: true
+  vars:
+    confirm_format: false
+
+  tasks:
+    - name: Detect firmware
+      ansible.builtin.stat:
+        path: /sys/firmware/efi
+      register: efi
+
+    - name: Set boot mode
+      ansible.builtin.set_fact:
+        is_uefi: "{{ efi.stat.exists }}"
+
+    - name: Install ReaR and common tools
+      ansible.builtin.dnf:
+        name: [rear, parted, gdisk, xfsprogs, lvm2, rsync]
+        state: present
+
+    - name: Install UEFI packages
+      ansible.builtin.dnf:
+        name: [grub2-efi-x64, shim-x64, efibootmgr, dosfstools]
+        state: present
+      when: is_uefi
+
+    - name: Install BIOS packages
+      ansible.builtin.dnf:
+        name: [syslinux, syslinux-extlinux]
+        state: present
+      when: not is_uefi
+
+    - name: Unmount the data backup drive during the OS backup
+      ansible.posix.mount:
+        path: "{{ data_backup_mount }}"
+        state: unmounted
+
+    - name: Is the ReaR drive already formatted?
+      ansible.builtin.command: blkid -L REAR-000
+      register: rear_label
+      failed_when: false
+      changed_when: false
+
+    - name: Stop if unformatted and formatting not confirmed
+      ansible.builtin.fail:
+        msg: "No REAR-000 drive found. Re-run with -e confirm_format=true (ERASES {{ rear_usb_disk }})."
+      when: rear_label.rc != 0 and not (confirm_format | bool)
+
+    - name: Format the ReaR drive
+      when: rear_label.rc != 0 and (confirm_format | bool)
+      block:
+        - name: Safety check
+          ansible.builtin.include_tasks: tasks/safe_disk.yml
+          vars:
+            disk_to_check: "{{ rear_usb_disk }}"
+
+        - name: rear format (ERASES THE DRIVE)
+          ansible.builtin.command: >-
+            rear -v format -- {{ '--efi' if is_uefi else '--bios' }}
+            {{ '--force' if rear_format_force | bool else '' }} -y {{ rear_usb_disk }}
+
+    - name: Deploy ReaR config
+      ansible.builtin.template:
+        src: rear-local.conf.j2
+        dest: /etc/rear/local.conf
+        mode: '0600'
+
+    - name: Save layout info on the target
+      ansible.builtin.shell: |
+        { date; lsblk -f; pvs; vgs; lvs; blkid; cat /etc/fstab; } > /root/layout-info.txt 2>&1
+      changed_when: true
+
+    - name: Copy layout info to the control node
+      ansible.builtin.fetch:
+        src: /root/layout-info.txt
+        dest: "artifacts/{{ inventory_hostname }}-layout-info.txt"
+        flat: true
+
+    - name: Run ReaR backup (rescue system and archive)
+      ansible.builtin.command: rear -v mkbackup
+      async: 14400
+      poll: 60
+      changed_when: true
+
+    - name: Create verify mountpoint
+      ansible.builtin.file:
+        path: /mnt/rear_verify
+        state: directory
+        mode: '0755'
+
+    - name: Mount ReaR drive read-only to verify
+      ansible.posix.mount:
+        path: /mnt/rear_verify
+        src: /dev/disk/by-label/REAR-000
+        fstype: ext4
+        opts: ro
+        state: ephemeral
+
+    - name: Find archive
+      ansible.builtin.find:
+        paths: /mnt/rear_verify/rear
+        patterns: 'backup.tar*'
+        recurse: true
+      register: archive
+
+    - name: Unmount
+      ansible.posix.mount:
+        path: /mnt/rear_verify
+        state: unmounted
+
+    - name: Archive must exist
+      ansible.builtin.assert:
+        that: archive.matched >= 1

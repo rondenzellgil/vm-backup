@@ -1,0 +1,10 @@
+---
+- name: Install Python 3.9 and rsync on OL8
+  hosts: target
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Install packages (raw, since Python 3.9 isn't there yet)
+      ansible.builtin.raw: >-
+        (dnf install -y python39 || dnf module install -y python39) && dnf install -y rsync
+      changed_when: true

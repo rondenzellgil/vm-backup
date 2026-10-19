@@ -1,0 +1,53 @@
+---
+# ansible-playbook 05-restore-data.yml -e confirm_restore=true
+- name: Restore data from the backup drive
+  hosts: target
+  become: true
+  vars:
+    confirm_restore: false
+
+  tasks:
+    - name: Require explicit confirmation
+      ansible.builtin.assert:
+        that: confirm_restore | bool
+
+    - name: Install rsync
+      ansible.builtin.dnf:
+        name: rsync
+        state: present
+
+    - name: Target must be a mounted filesystem
+      ansible.builtin.command: mountpoint -q {{ data_src }}
+      changed_when: false
+
+    - name: Look for existing files in target
+      ansible.builtin.find:
+        paths: "{{ data_src }}"
+        file_type: any
+      register: existing
+
+    - name: Refuse to restore over existing data
+      ansible.builtin.assert:
+        that: existing.matched == 0
+        fail_msg: "{{ data_src }} is not empty."
+
+    - name: Create mountpoint
+      ansible.builtin.file:
+        path: "{{ data_backup_mount }}"
+        state: directory
+        mode: '0755'
+
+    - name: Mount backup drive read-only
+      ansible.posix.mount:
+        path: "{{ data_backup_mount }}"
+        src: "/dev/disk/by-label/{{ data_backup_label }}"
+        fstype: xfs
+        opts: ro
+        state: ephemeral
+
+    - name: Start detached restore
+      ansible.builtin.command: >-
+        systemd-run --unit=datarestore --property=RemainAfterExit=yes
+        rsync -aHAX --numeric-ids --partial --stats --log-file=/var/log/datarestore.log
+        {{ data_backup_mount }}/data/ {{ data_src }}/
+      changed_when: true

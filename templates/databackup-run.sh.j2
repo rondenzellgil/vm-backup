@@ -1,0 +1,29 @@
+#!/bin/bash
+# Managed by Ansible
+PASS="$1"
+SRC="{{ data_src }}/"
+DST="{{ data_backup_mount }}/data/"
+LOG="/var/log/databackup-pass${PASS}.log"
+SERVICES=({{ data_writers | join(' ') }})
+
+mountpoint -q "{{ data_src }}"          || { echo "ABORT: {{ data_src }} not mounted" | tee -a "$LOG"; exit 90; }
+mountpoint -q "{{ data_backup_mount }}" || { echo "ABORT: backup drive not mounted" | tee -a "$LOG"; exit 91; }
+
+start_services() { for s in "${SERVICES[@]}"; do systemctl start "$s"; done; }
+
+EXTRA=""
+if [ "$PASS" = "2" ]; then
+  trap start_services EXIT
+  for s in "${SERVICES[@]}"; do systemctl stop "$s"; done
+  EXTRA="--delete"
+fi
+
+mkdir -p "$DST"
+rsync -aHAX --numeric-ids --partial --stats $EXTRA --log-file="$LOG" "$SRC" "$DST"
+RC=$?
+
+if [ "$PASS" = "2" ] && [ "$RC" -eq 0 ]; then
+  rsync -aHAXn --delete --out-format='%n' "$SRC" "$DST" > /var/log/databackup-verify.log 2>&1
+  echo "Verify dry-run lines (should be near 0): $(wc -l < /var/log/databackup-verify.log)" >> "$LOG"
+fi
+exit $RC

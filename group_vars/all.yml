@@ -1,0 +1,20 @@
+# vm = Proxmox test, baremetal = the real server
+env_type: vm
+
+# ReaR drive (OS + disk layout). ERASED when formatted. Whole disk, not a partition.
+rear_usb_disk: /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_REAR0001
+
+# Big data drive. ERASED when formatted. Whole disk, not a partition.
+data_backup_disk: /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_DATABK0001
+data_backup_part: "{{ data_backup_disk }}-part1"
+data_backup_label: DATABACKUP
+data_backup_mount: /mnt/databackup
+
+# The big LVM data volume that gets rsynced, not archived by ReaR
+data_src: /data
+
+# Virtual disks aren't flagged removable, so ReaR needs --force on a VM
+rear_format_force: "{{ env_type == 'vm' }}"
+
+# Services that write to data_src. They are stopped during pass 2.
+data_writers: []     # e.g. [postgresql, smb, nfs-server]

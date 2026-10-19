@@ -1,0 +1,118 @@
+---
+# First run (formats the big drive, ERASES IT):  -e backup_pass=1 -e confirm_format=true
+# Pass 1 (live, takes long):                      -e backup_pass=1
+# Pass 2 (final, stops data_writers):             -e backup_pass=2
+- name: Data backup (detached rsync)
+  hosts: target
+  become: true
+  vars:
+    backup_pass: 1
+    confirm_format: false
+    confirm_no_writers: false
+
+  tasks:
+    - name: Pass must be 1 or 2
+      ansible.builtin.assert:
+        that: (backup_pass | int) in [1, 2]
+
+    - name: Install rsync
+      ansible.builtin.dnf:
+        name: rsync
+        state: present
+
+    - name: Data source must be a real mountpoint
+      ansible.builtin.command: mountpoint -q {{ data_src }}
+      changed_when: false
+
+    - name: Pass 2 with no listed writers needs confirmation
+      ansible.builtin.pause:
+        prompt: "data_writers is empty. Is NOTHING writing to {{ data_src }}? Enter to continue, Ctrl+C then A to abort"
+      when: (backup_pass | int) == 2 and data_writers | length == 0 and not (confirm_no_writers | bool)
+
+    - name: Is the backup drive already prepared?
+      ansible.builtin.command: blkid -L {{ data_backup_label }}
+      register: data_label
+      failed_when: false
+      changed_when: false
+
+    - name: Stop if unprepared and formatting not confirmed
+      ansible.builtin.fail:
+        msg: "No {{ data_backup_label }} drive. Re-run with -e confirm_format=true (ERASES {{ data_backup_disk }})."
+      when: data_label.rc != 0 and not (confirm_format | bool)
+
+    - name: Partition and format the big drive
+      when: data_label.rc != 0 and (confirm_format | bool)
+      block:
+        - name: Safety check
+          ansible.builtin.include_tasks: tasks/safe_disk.yml
+          vars:
+            disk_to_check: "{{ data_backup_disk }}"
+
+        - name: GPT partition (ERASES THE DRIVE)
+          community.general.parted:
+            device: "{{ data_backup_disk }}"
+            label: gpt
+            number: 1
+            part_start: 1MiB
+            part_end: 100%
+            state: present
+
+        - name: Wait for udev
+          ansible.builtin.command: udevadm settle
+          changed_when: false
+
+        - name: Create XFS filesystem
+          community.general.filesystem:
+            fstype: xfs
+            dev: "{{ data_backup_part }}"
+            opts: "-L {{ data_backup_label }}"
+
+    - name: Create mountpoint
+      ansible.builtin.file:
+        path: "{{ data_backup_mount }}"
+        state: directory
+        mode: '0755'
+
+    - name: Mount backup drive (not added to fstab)
+      ansible.posix.mount:
+        path: "{{ data_backup_mount }}"
+        src: "/dev/disk/by-label/{{ data_backup_label }}"
+        fstype: xfs
+        state: ephemeral
+
+    - name: Deploy rsync runner script
+      ansible.builtin.template:
+        src: databackup-run.sh.j2
+        dest: /usr/local/sbin/databackup-run.sh
+        mode: '0750'
+
+    - name: Inspect existing unit for this pass
+      ansible.builtin.command: systemctl show -p LoadState -p SubState databackup-pass{{ backup_pass }}.service
+      register: unit
+      changed_when: false
+
+    - name: Work out unit state
+      ansible.builtin.set_fact:
+        unit_running: "{{ 'SubState=running' in unit.stdout }}"
+        unit_loaded: "{{ 'LoadState=loaded' in unit.stdout }}"
+
+    - name: Clear a finished or failed unit so it can be re-run
+      ansible.builtin.shell: >-
+        systemctl stop databackup-pass{{ backup_pass }}.service;
+        systemctl reset-failed databackup-pass{{ backup_pass }}.service
+      failed_when: false
+      when: unit_loaded and not unit_running
+
+    - name: Already running
+      ansible.builtin.debug:
+        msg: "Pass {{ backup_pass }} is already running. Use 04-data-status.yml to watch it."
+      when: unit_running
+
+    - name: Start detached rsync (survives SSH or control node loss)
+      ansible.builtin.command: >-
+        systemd-run --unit=databackup-pass{{ backup_pass }}
+        --description="Data backup pass {{ backup_pass }}"
+        --property=RemainAfterExit=yes
+        /usr/local/sbin/databackup-run.sh {{ backup_pass }}
+      when: not unit_running
+      changed_when: true

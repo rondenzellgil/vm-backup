@@ -1,0 +1,22 @@
+---
+- name: Resolve real device path
+  ansible.builtin.command: readlink -f {{ disk_to_check }}
+  register: sd_real
+  changed_when: false
+
+- name: Mountpoints on that disk
+  ansible.builtin.command: lsblk -nro MOUNTPOINT {{ sd_real.stdout }}
+  register: sd_mounts
+  changed_when: false
+
+- name: LVM physical volumes
+  ansible.builtin.command: pvs --noheadings -o pv_name
+  register: sd_pvs
+  changed_when: false
+
+- name: Refuse to continue if the disk is in use
+  ansible.builtin.assert:
+    that:
+      - sd_mounts.stdout | trim == ''
+      - sd_real.stdout not in sd_pvs.stdout
+    fail_msg: "{{ disk_to_check }} ({{ sd_real.stdout }}) is mounted or part of LVM. Wrong disk?"

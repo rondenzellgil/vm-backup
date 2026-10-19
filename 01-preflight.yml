@@ -1,0 +1,78 @@
+---
+- name: Preflight checks (read-only)
+  hosts: target
+  become: true
+  tasks:
+    - name: Assert Oracle Linux 8
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == "OracleLinux"
+          - ansible_facts['distribution_major_version'] == "8"
+
+    - name: env_type must match reality
+      ansible.builtin.assert:
+        that:
+          - (env_type == 'vm') == (ansible_facts['virtualization_role'] == 'guest')
+        fail_msg: "env_type={{ env_type }} but this host is {{ ansible_facts['virtualization_role'] }}"
+
+    - name: Detect firmware
+      ansible.builtin.stat:
+        path: /sys/firmware/efi
+      register: efi
+
+    - name: Show firmware type
+      ansible.builtin.debug:
+        msg: "{{ 'UEFI' if efi.stat.exists else 'BIOS' }}"
+
+    - name: Secure Boot state (UEFI only)
+      ansible.builtin.command: mokutil --sb-state
+      register: sb
+      failed_when: false
+      changed_when: false
+      when: efi.stat.exists
+
+    - name: Show Secure Boot state
+      ansible.builtin.debug:
+        var: sb.stdout
+      when: efi.stat.exists
+
+    - name: ReaR available in enabled repos?
+      ansible.builtin.command: dnf -q list rear
+      changed_when: false
+
+    - name: LVM and disk overview
+      ansible.builtin.shell: pvs; vgs; lvs; lsblk -f; lsblk -dno NAME,SIZE,SERIAL,TYPE
+      register: lvm
+      changed_when: false
+
+    - name: Show overview
+      ansible.builtin.debug:
+        var: lvm.stdout_lines
+
+    - name: Data source is a mountpoint
+      ansible.builtin.command: mountpoint -q {{ data_src }}
+      changed_when: false
+
+    - name: Used bytes in data source
+      ansible.builtin.shell: df -B1 --output=used {{ data_src }} | tail -n1
+      register: data_used
+      changed_when: false
+
+    - name: Size of big backup drive (bytes)
+      ansible.builtin.command: lsblk -bdno SIZE {{ data_backup_disk }}
+      register: big_size
+      changed_when: false
+
+    - name: Big drive must hold the data plus 5 percent
+      ansible.builtin.assert:
+        that:
+          - (big_size.stdout | trim | int) > ((data_used.stdout | trim | int) * 1.05)
+        fail_msg: "Backup drive too small for {{ data_src }}"
+
+    - name: Backup disks must not be mounted or in LVM
+      ansible.builtin.include_tasks: tasks/safe_disk.yml
+      vars:
+        disk_to_check: "{{ item }}"
+      loop:
+        - "{{ rear_usb_disk }}"
+        - "{{ data_backup_disk }}"

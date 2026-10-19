@@ -1,0 +1,58 @@
+---
+# Status:                        ansible-playbook 04-data-status.yml
+# Unmount drive when finished:   -e finish=true
+- name: Data backup status
+  hosts: target
+  become: true
+  vars:
+    finish: false
+
+  tasks:
+    - name: Unit state
+      ansible.builtin.command: >-
+        systemctl show -p ActiveState -p SubState -p Result -p ExecMainStatus
+        databackup-pass{{ item }}.service
+      loop: [1, 2]
+      register: states
+      changed_when: false
+
+    - name: Show unit state
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ states.results }}"
+      loop_control:
+        label: "pass {{ item.item }}"
+
+    - name: Last log lines
+      ansible.builtin.shell: tail -n 12 /var/log/databackup-pass{{ item }}.log 2>/dev/null || true
+      loop: [1, 2]
+      register: logs
+      changed_when: false
+
+    - name: Show log tails
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ logs.results }}"
+      loop_control:
+        label: "pass {{ item.item }}"
+
+    - name: Backup drive usage
+      ansible.builtin.command: df -h {{ data_backup_mount }}
+      register: usage
+      failed_when: false
+      changed_when: false
+
+    - name: Show usage
+      ansible.builtin.debug:
+        var: usage.stdout_lines
+
+    - name: Is any backup job still running?
+      ansible.builtin.shell: systemctl show -p SubState databackup-pass1.service databackup-pass2.service | grep -c 'SubState=running' || true
+      register: running_count
+      changed_when: false
+
+    - name: Unmount the drive when finished
+      ansible.posix.mount:
+        path: "{{ data_backup_mount }}"
+        state: unmounted
+      when: finish | bool and running_count.stdout | trim == '0'

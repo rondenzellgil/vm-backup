@@ -1,0 +1,7 @@
+# Managed by Ansible
+OUTPUT=USB
+BACKUP=NETFS
+BACKUP_URL=usb:///dev/disk/by-label/REAR-000
+USB_DEVICE_FILESYSTEM=ext4
+USB_RETAIN_BACKUP_NR=2
+BACKUP_PROG_EXCLUDE+=( '/tmp/*' '/dev/shm/*' '/var/tmp/*' '/var/cache/*' '{{ data_src }}/*' '{{ data_backup_mount }}/*' )
